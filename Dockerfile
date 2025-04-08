@@ -14,7 +14,6 @@ RUN apt-get update \
     && dpkg-reconfigure -f noninteractive tzdata \
     && sudo add-apt-repository ppa:deadsnakes/ppa \
     && sudo apt install python3.12-dev python3.12-venv -y \
-    && sudo apt remove --purge --auto-remove cmake -y \
     && sudo apt update \
     && sudo apt clean all \
     && wget https://apt.llvm.org/llvm.sh \
@@ -25,13 +24,9 @@ RUN apt-get update \
     && sudo apt-add-repository "deb https://apt.kitware.com/ubuntu/ $(lsb_release -cs) main" \
     && sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 6AF7F09730B3F0A4 \
     && sudo apt update \
-    && sudo apt install kitware-archive-keyring \
-    && sudo rm /etc/apt/trusted.gpg.d/kitware.gpg \
-    && curl -sSL https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - \    
-    && add-apt-repository ppa:ubuntu-toolchain-r/test \
     && apt-get install --no-install-recommends -y \
         gpg zip unzip tar git \
-        pkg-config ninja-build ccache cmake build-essential \
+        pkg-config ninja-build ccache build-essential \
         doctest-dev \
         clang-18 lld-18 \
         python3.11 python3.11-dev \
@@ -39,13 +34,16 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-RUN dpkg -l | grep libgoogle-glog-dev
-RUN dpkg -l | grep llvm-18
+RUN wget https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz \
+    && apt remove --purge --auto-remove cmake -y \
+    && tar xz -f cmake-3.31.6-linux-x86_64.tar.gz -C /opt \
+    && ln -s /opt/cmake-3.31.6-linux-x86_64/bin/cmake /usr/local/bin/cmake \
+    && ln -s /opt/cmake-3.31.6-linux-x86_64/bin/cmake /usr/bin/cmake
 
 # download and set up multiplier
 RUN mkdir -p /OGHarn
 COPY . OGHarn
-RUN [ -d "OGHarn/extras/multiplier" ] && rm -r "OGHarn/extras/multiplier" && mkdir OGHarn/extras/multiplier
+RUN mkdir OGHarn/extras/multiplier
 WORKDIR OGHarn/extras/multiplier
 RUN mkdir src build install
 
