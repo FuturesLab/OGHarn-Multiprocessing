@@ -1,7 +1,7 @@
 
 # OGHarn: Oracle-guided Fuzzing Harness Generation
 
-<img align="right" src="logo.png" alt="OGHarn logo" width="240" height="240"/>
+<img align="right" src=".logo.png" alt="OGHarn logo" width="240" height="240"/>
 
 This repository provides the source code for **OGHarn**: a prototype framework for automated generation of fuzzing harnesses for C library APIs. 
 
