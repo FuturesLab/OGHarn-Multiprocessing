@@ -143,7 +143,7 @@ class Harness_Builder:
         # first attempt to call auxiliary functions 
         final_sequences = self.call_auxiliary_func(possible_aux_function_calls, sequence, currFunction, restricted_indexes, aux_path, depth, explore_further)
 
-        if len(final_sequences) or not self.explore_further: 
+        if len(final_sequences) or not explore_further:
             return final_sequences
 
         # call other functions that are not auxiliary but are still potentially easy to call
@@ -407,11 +407,12 @@ class Harness_Builder:
                             return interesting_seq
                     if i not in restricted_args:
                          currArgumentList[i].append(self.define_new_value(currFunction.mult_args[i], func, curr_sequence, i))
-                    if currFunction.mult_args[i].pointers and currFunction.mult_args[i].base_type in self.compatibility.buffer_types:
+                    if currFunction.mult_args[i].base_type in self.compatibility.buffer_types:
                         currArgumentList[i].append(self.define_new_value(currFunction.mult_args[i], func, curr_sequence, i))
-                        currArgumentList[i].append(literal_arg("\"r\""))
-                        currArgumentList[i].append(literal_arg("\"w\""))
-                        currArgumentList[i].append(literal_arg("fuzzData+size"))
+                        if currFunction.mult_args[i].pointers==1:
+                            currArgumentList[i].append(literal_arg("\"r\""))
+                            currArgumentList[i].append(literal_arg("\"w\""))
+                            currArgumentList[i].append(literal_arg("fuzzData+size"))
 
             for i in range(0, len(currFunction.mult_args)):
                 if i != priorityArg and i not in restricted_args:
