@@ -13,6 +13,7 @@ import argparse
 import pathlib
 import subprocess
 import random
+import time
 
 def dump_potential_args(functions):
     arg_dump = open(f"{output_dir}/debug-info/log_call_site_params.txt", "w")
@@ -147,7 +148,9 @@ def exit_routine():
         subprocess.run(f"mv {output_dir}/gen/harness.out {output_dir}/final-harnesses/bin/harness{harnessCount}.out", text=True, shell=True)
         compiler.globalBitmap = compiler.globalBitmap.union(harness.bitmap)
     fstr = f"Total coverage captured between {harnessCount} files in {output_dir}/final-harnesses: {len(compiler.globalBitmap)}\n"
+    # -------------------------------------------------------------------------------------------------------------------------------------------------
     os.write(sys.stdout.fileno(), b"DONE!\n")
+    # -------------------------------------------------------------------------------------------------------------------------------------------------
     os.write(sys.stdout.fileno(), bytes(fstr, 'utf-8'))
     if debug:
         harnessed_function_feedback = open(f"{output_dir}/debug-info/log_harnessed_funcs.txt", "w")
@@ -163,6 +166,10 @@ def exit_routine():
         shutil.rmtree(f"{input_dir}/seeds_validcp")
     if os.path.exists(f"{input_dir}/seeds_invalidcp"):
         shutil.rmtree(f"{input_dir}/seeds_invalidcp")
+
+    global end
+    end = time.time()
+    print(f"Elapsed time: {end - start} seconds")
 
 def getBestHarnesses(compiler, heap, limit):
     harnessesToGenerate = []
@@ -437,6 +444,10 @@ def begin_harnessing(argBuilder, functions, compiler, init_sequences):
     exit_routine()
 
 if __name__ == "__main__":
+    global start
+    start = time.time()
+    print("Starting OGHarn...")
+
     signal.signal(signal.SIGINT, handle_interrupt)
     signal.signal(signal.SIGTERM, handle_interrupt)
     parser = argparse.ArgumentParser(add_help=False)
