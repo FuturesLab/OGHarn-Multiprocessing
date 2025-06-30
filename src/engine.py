@@ -8,6 +8,7 @@ import subprocess
 import time
 import pathlib
 import os, sys
+import uuid
 
 '''Represents a function contained in the header file of an api:
     -name represents the name of the function
@@ -982,7 +983,18 @@ class BuildDependencies:
             post_arg_index += 1
 
 
+# Creates a private OUT directory
+def _new_scratch_out(base: str) -> pathlib.Path:
+    """
+    Make a unique OUT directory inside <base>/gen/ for one compile-and-run.
+    """
+    ident = f"w{os.getpid()}_{uuid.uuid4().hex[:6]}"
+    d = pathlib.Path(base) / "gen" / ident
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
 class CompileHarness:
+    # Added _new_scratch_out to help create new directories. Changed where checkSequence outputs, updated compileHarnessStatic and compileHarness.
     def __init__(self, input_dir, output_dir, functions, hardcodedVars, includes, read_from_buffer, debug, compatibility,
                  allow_stderr, target_func, execute_static_version, allow_lincov, add_define_to_harness):
         # constructor arguments
@@ -1025,13 +1037,13 @@ class CompileHarness:
             open(f"{self.output_dir}/debug-info/log_setup_routines.txt", "w")
 
     def checkSequence(self, sequence):
-        newHarness = ConvertToC(sequence, self.includes, self.hardcodedVars, self.functions, self.read_from_buffer,
+        # Change how the new harness is created to use the new scratch OUT directory
+        newHarness = ConvertToC(sequence, self.includes, self.hardcodedVars,
+                                self.functions, self.read_from_buffer,
                                 self.compatibility, self.add_define_to_harness)
-        currentHarness = open(f"{self.output_dir}/gen/harness.c", "w")
+
         convertedHarness = str(newHarness.Convert())
-        sequence.cCode = convertedHarness
-        currentHarness.write(convertedHarness)
-        currentHarness.close()
+        sequence.cCode = convertedHarness          # keep C source in memory only
 
         #stat tracking
         newTime = time.time()
@@ -1044,154 +1056,163 @@ class CompileHarness:
         return retval
 
     # there are some cases where the behavior of the library under test differs depending on if it is compiled statically or dynamically. This functionality just compiles the harness statically and checks if it crashes on any inputs
-    def compileHarnessStatic(self, sequence):
-        proc = subprocess.run(f"cd {self.input_dir} && OUT={self.output_dir}/gen make harness_static", stderr=subprocess.PIPE, stdout=subprocess.PIPE,
-                              text=True, shell=True)
-        subprocess.run(f"cd {os.getcwd()}", text=True, shell=True)
-        if not proc.returncode:
-            seeds = os.listdir(f"{self.input_dir}/seeds_validcp")
-            invalidSeeds = os.listdir(f"{self.input_dir}/seeds_invalidcp")
-            for seed in seeds:
-                try:
-                    proc = subprocess.run(f"cd {self.input_dir} && OUT={self.output_dir}/gen SEED={self.input_dir}/seeds_validcp/{seed} make showmap_static",
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
-                    subprocess.run(f"cd {os.getcwd()}", text=True, shell=True)
-                    shutil.copytree(f"{self.input_dir}/seeds_valid", f"{self.input_dir}/seeds_validcp", dirs_exist_ok=True)
-                    if proc.returncode:
-                        self.failedCrash += 1
-                        return proc.returncode, f"Static Execution: crashed on file: {seed} err - {proc.stdout}\n"
-                except UnicodeDecodeError:
-                    if proc.returncode:
-                        self.failedCrash += 1
-                        return proc.returncode, f"Static Execution: crashed on file: {seed} err - {proc.stdout}\n"
-                except subprocess.CalledProcessError:
-                    # catch exception where we terminate OGHarn while a subprocess is running
-                    continue
-            for seed in invalidSeeds:
-                try:
-                    proc = subprocess.run(
-                        f"cd {self.input_dir} && OUT={self.output_dir}/gen SEED={self.input_dir}/seeds_invalidcp/{seed} make showmap_static",
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
-                    subprocess.run(f"cd {os.getcwd()}", text=True, shell=True)
-                    shutil.copytree(f"{self.input_dir}/seeds_invalid", f"{self.input_dir}/seeds_invalidcp",
-                                    dirs_exist_ok=True)
-                    if proc.returncode:
-                        self.failedCrash += 1
-                        return proc.returncode, f"Static Execution: crashed on file: {seed} err- {proc.stdout}\n"
-                except UnicodeDecodeError:
-                    if proc.returncode:
-                        self.failedCrash += 1
-                        return proc.returncode, f"Static Execution: crashed on file: {seed} err - {proc.stdout}\n"
-                    continue
-                except subprocess.CalledProcessError:
-                    # catch exception where we terminate OGHarn while a subprocess is running
-                    continue
-            return 0, ""
-        else:
+    # Update the compileHarness function to use the new scratch OUT directory     
+    def compileHarnessStatic(self, sequence, env, scratch_tmp):
+        """
+        Build static harness and execute it on all seeds.  Uses the same scratch
+        OUT directory and environment prepared by compileHarness.
+        Returns (exit_code, message) with exit_code == 0 as ok
+        """
+        # compile ───────────────────────────────────────────────────────────
+        proc = subprocess.run(["make", "-C", self.input_dir, "harness_static"],
+                            env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+        if proc.returncode:
+            self.failedComp += 1
             return 1, "Static Compilation: " + proc.stderr
-            
 
+        # run on valid seeds ───────────────────────────────────────────────
+        seeds = os.listdir(f"{self.input_dir}/seeds_validcp")
+        for seed in seeds:
+            try:
+                proc = subprocess.run(
+                    ["make", "-C", self.input_dir, "showmap_static"],
+                    env=dict(env, SEED=f"{self.input_dir}/seeds_validcp/{seed}"),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if proc.returncode:
+                    self.failedCrash += 1
+                    return proc.returncode, \
+                        f"Static Execution: crashed on file: {seed} err - {proc.stdout}\n"
+            except (UnicodeDecodeError, subprocess.CalledProcessError):
+                if proc.returncode:
+                    self.failedCrash += 1
+                    return proc.returncode, \
+                        f"Static Execution: crashed on file: {seed} err - {proc.stdout}\n"
+
+        # run on invalid seeds (same pattern) ──────────────────────────────
+        invalidSeeds = os.listdir(f"{self.input_dir}/seeds_invalidcp")
+        for seed in invalidSeeds:
+            try:
+                proc = subprocess.run(
+                    ["make", "-C", self.input_dir, "showmap_static"],
+                    env=dict(env, SEED=f"{self.input_dir}/seeds_invalidcp/{seed}"),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if proc.returncode:
+                    self.failedCrash += 1
+                    return proc.returncode, \
+                        f"Static Execution: crashed on file: {seed} err - {proc.stdout}\n"
+            except (UnicodeDecodeError, subprocess.CalledProcessError):
+                if proc.returncode:
+                    self.failedCrash += 1
+                    return proc.returncode, \
+                        f"Static Execution: crashed on file: {seed} err - {proc.stdout}\n"
+
+        return 0, ""
 
     def compileHarness(self, sequence):
+        """
+        Core “build → run → collect bitmap” routine.
+        Creates a private OUT directory, writes harness.c, compiles, then
+        executes the harness on all seed files, collecting coverage.
+        """
+        # 1. prepare isolated OUT directory and environment
+        scratch_dir = _new_scratch_out(self.output_dir)
+        scratch_tmp = scratch_dir / "tempfile"
+
+        # write the generated harness
+        with open(scratch_dir / "harness.c", "w") as f:
+            f.write(sequence.cCode)
+
+        env = os.environ.copy()
+        env["OUT"] = str(scratch_dir)
+
+        # optional static pass
         if self.execute_static_version:
-            exit_code, result = self.compileHarnessStatic(sequence)
+            exit_code, msg = self.compileHarnessStatic(sequence, env, scratch_tmp)
             if exit_code:
-                return result
-        proc = subprocess.run(f"cd {self.input_dir} && OUT={self.output_dir}/gen make harness", stderr=subprocess.PIPE, stdout=subprocess.PIPE,
-                              text=True, shell=True)
-        subprocess.run(f"cd {os.getcwd()}", text=True, shell=True)
-        if not proc.returncode:
-            totalBitmap = set()
-            seeds = os.listdir(f"{self.input_dir}/seeds_validcp")
-            invalidSeeds = os.listdir(f"{self.input_dir}/seeds_invalidcp")
-            seedMaps = []
-            unique_cov = False
-            const_increase_amount = -1
-            const_increase = True
-            for seed in seeds:
-                try:
-                    proc = subprocess.run(f"cd {self.input_dir} && OUT={self.output_dir}/gen SEED={self.input_dir}/seeds_validcp/{seed} make showmap",
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
-                    subprocess.run(f"cd {os.getcwd()}", text=True, shell=True)
-                    shutil.copytree(f"{self.input_dir}/seeds_valid", f"{self.input_dir}/seeds_validcp", dirs_exist_ok=True)
-                    if proc.returncode:
-                        self.failedCrash += 1
-                        return f"crashed on file: {seed} err - {proc.stdout}\n"
-                    if (not len(proc.stderr)) or self.allow_stderr:
-                        currBitmap = self.getBitmap(open(f"{self.output_dir}/gen/tempfile", "r"))
-                        # only need to check if we're gaining unique coverage if no other seed inputs have demonstrated that.
-                        if seed in sequence.seedCov:
-                            if const_increase_amount < 0:
-                                const_increase_amount = len(currBitmap.difference(sequence.seedCov[seed]))
-                            if len(currBitmap.difference(sequence.seedCov[seed])) != const_increase_amount:
-                                const_increase = False
-                        sequence.seedCov[seed] = currBitmap
-                        if not unique_cov:
-                            unique_cov = unique_cov or any([len(currBitmap ^ bmap) > 5 for bmap in seedMaps])
-                            seedMaps.append(currBitmap)
-                        totalBitmap = totalBitmap.union(currBitmap)
-                except UnicodeDecodeError:
-                    if proc.returncode:
-                        self.failedCrash += 1
-                        return f"crashed on file: {seed} err - {proc.stdout}\n"
-                    # If the standard error spits out some random bytes a decoding exception can occur. If we don't care about the standard error then we leave this
-                    if self.allow_stderr:
-                        currBitmap = self.getBitmap(open(f"{self.output_dir}/gen/tempfile", "r"))
-                        if seed in sequence.seedCov:
-                            if const_increase_amount < 0:
-                                const_increase_amount = len(currBitmap.difference(sequence.seedCov[seed]))
-                            if len(currBitmap.difference(sequence.seedCov[seed])) != const_increase_amount:
-                                const_increase = False
-                        sequence.seedCov[seed] = currBitmap
-                        if not unique_cov:
-                            unique_cov = unique_cov or any([len(currBitmap ^ bmap) > 5 for bmap in seedMaps])
-                            seedMaps.append(currBitmap)
-                        totalBitmap = totalBitmap.union(currBitmap)
-                    shutil.copytree(f"{self.input_dir}/seeds_valid", f"{self.input_dir}/seeds_validcp", dirs_exist_ok=True)
-                    continue
-                except subprocess.CalledProcessError:
-                    # catch exception where we terminate OGHarn while a subprocess is running
-                    continue
-            if not unique_cov and sequence.setupLen:
-                self.failedCov += 1
-                return "no unique coverage observed between seeds\n"
-            if (const_increase and sequence.setupLen) and not self.allow_lincov:
-                self.failedCov += 1
-                return "constant coverage increase between seeds\n"
-            uninteresting_cov = True
-            for seed in invalidSeeds:
-                try:
-                    proc = subprocess.run(
-                        f"cd {self.input_dir} && OUT={self.output_dir}/gen SEED={self.input_dir}/seeds_invalidcp/{seed} make showmap",
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
-                    subprocess.run(f"cd {os.getcwd()}", text=True, shell=True)
-                    shutil.copytree(f"{self.input_dir}/seeds_invalid", f"{self.input_dir}/seeds_invalidcp",
-                                    dirs_exist_ok=True)
-                    if proc.returncode:
-                        self.failedCrash += 1
-                        return f"crashed on file: {seed} err- {proc.stdout}\n"
-                    currBitmap = self.getBitmap(open(f"{self.output_dir}/gen/tempfile", "r"))
-                    if not len(totalBitmap.intersection(currBitmap)) == len(totalBitmap):
-                        uninteresting_cov = False
-                except UnicodeDecodeError:
-                    if proc.returncode:
-                        self.failedCrash += 1
-                        return f"crashed on file: {seed} err - {proc.stdout}\n"
-                    shutil.copytree(f"{self.input_dir}/seeds_invalid", f"{self.input_dir}/seeds_invalidcp",
-                                    dirs_exist_ok=True)
-                    continue
-                except subprocess.CalledProcessError:
-                    # catch exception where we terminate OGHarn while a subprocess is running
-                    continue
-            if uninteresting_cov:
-                if sequence.setupLen:
-                    self.failedCov += 1
-                    return "invalid seeds offer no coverage difference\n"
-            sequence.uninteresting_setup = uninteresting_cov or (not unique_cov)
-            return totalBitmap
-        else:
+                return msg
+
+        # 2. dynamic compile
+        proc = subprocess.run(["make", "-C", self.input_dir, "harness"],
+                            env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+        if proc.returncode:
             self.failedComp += 1
             return proc.stderr
+
+        # 3. run on valid seeds
+        totalBitmap = set()
+        seeds = os.listdir(f"{self.input_dir}/seeds_validcp")
+        invalidSeeds = os.listdir(f"{self.input_dir}/seeds_invalidcp")
+        seedMaps, unique_cov = [], False
+        const_increase_amount, const_increase = -1, True
+
+        for seed in seeds:
+            try:
+                proc = subprocess.run(
+                    ["make", "-C", self.input_dir, "showmap"],
+                    env=dict(env, SEED=f"{self.input_dir}/seeds_validcp/{seed}"),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if proc.returncode:
+                    self.failedCrash += 1
+                    return f"crashed on file: {seed} err - {proc.stdout}\n"
+
+                if (not proc.stderr) or self.allow_stderr:
+                    currBitmap = self.getBitmap(open(scratch_tmp, "r"))
+                    # constant-increase heuristic (unchanged logic)
+                    if seed in sequence.seedCov:
+                        if const_increase_amount < 0:
+                            const_increase_amount = len(
+                                currBitmap.difference(sequence.seedCov[seed]))
+                        if len(currBitmap.difference(sequence.seedCov[seed])) \
+                                != const_increase_amount:
+                            const_increase = False
+                    sequence.seedCov[seed] = currBitmap
+                    if not unique_cov:
+                        unique_cov = any(
+                            len(currBitmap ^ bmap) > 5 for bmap in seedMaps)
+                        seedMaps.append(currBitmap)
+                    totalBitmap.update(currBitmap)
+            except (UnicodeDecodeError, subprocess.CalledProcessError):
+                if proc.returncode:
+                    self.failedCrash += 1
+                    return f"crashed on file: {seed} err - {proc.stdout}\n"
+                continue
+
+        # 4.  heuristics on coverage quality (unchanged, but uses scratch_tmp) –─
+        if not unique_cov and sequence.setupLen:
+            self.failedCov += 1
+            return "no unique coverage observed between seeds\n"
+        if const_increase and sequence.setupLen and not self.allow_lincov:
+            self.failedCov += 1
+            return "constant coverage increase between seeds\n"
+
+        uninteresting_cov = True
+        for seed in invalidSeeds:
+            try:
+                proc = subprocess.run(
+                    ["make", "-C", self.input_dir, "showmap"],
+                    env=dict(env, SEED=f"{self.input_dir}/seeds_invalidcp/{seed}"),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if proc.returncode:
+                    self.failedCrash += 1
+                    return f"crashed on file: {seed} err- {proc.stdout}\n"
+                currBitmap = self.getBitmap(open(scratch_tmp, "r"))
+                if len(totalBitmap.intersection(currBitmap)) != len(totalBitmap):
+                    uninteresting_cov = False
+            except (UnicodeDecodeError, subprocess.CalledProcessError):
+                if proc.returncode:
+                    self.failedCrash += 1
+                    return f"crashed on file: {seed} err - {proc.stdout}\n"
+                continue
+
+        if uninteresting_cov and sequence.setupLen:
+            self.failedCov += 1
+            return "invalid seeds offer no coverage difference\n"
+
+        sequence.uninteresting_setup = uninteresting_cov or (not unique_cov)
+        return totalBitmap
+
 
     def getBitmap(self, file):
         bmap = set()
